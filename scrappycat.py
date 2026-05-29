@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
- /\_____/\
+ /\\_____/\\
 ( o   o  )   ScrappyCat 🐱
  =( Y )=     Lead scraper for indie devs
-  )   (      Maps → Phone · WhatsApp · Email
+  )   (      Maps -> Phone - WhatsApp - Email
  (_)-(_)
 """
 
@@ -99,12 +99,13 @@ async def scrape_place(page, url: str) -> dict:
 
 async def collect_links(page, query: str, depth: int) -> list[str]:
     search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-    await page.goto(search_url, timeout=20000, wait_until='domcontentloaded')
-    await page.wait_for_timeout(2000)
+    await page.goto(search_url, timeout=30000, wait_until='domcontentloaded')
+    await page.wait_for_timeout(3000)
 
     feed = page.locator('[role="feed"]')
     links = set()
     last_count = 0
+    stale_rounds = 0
 
     for _ in range(depth):
         hrefs = await page.locator('[role="feed"] a[href*="/maps/place/"]').evaluate_all(
@@ -112,10 +113,14 @@ async def collect_links(page, query: str, depth: int) -> list[str]:
         )
         links.update(hrefs)
         if len(links) == last_count:
-            break
+            stale_rounds += 1
+            if stale_rounds >= 3:
+                break
+        else:
+            stale_rounds = 0
         last_count = len(links)
-        await feed.evaluate('el => el.scrollTop += 600')
-        await page.wait_for_timeout(800 + random.randint(0, 400))
+        await feed.evaluate('el => el.scrollTop += 800')
+        await page.wait_for_timeout(1200 + random.randint(0, 600))
 
     return list(links)
 
