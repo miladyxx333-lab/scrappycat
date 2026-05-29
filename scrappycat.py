@@ -23,6 +23,29 @@ console = Console()
 EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 SKIP_EMAIL_DOMAINS = {'example', 'sentry', 'wix', 'schema', 'email', 'domain', 'yoursite'}
 
+LATAM_QUERIES = {
+    'xalapa': [
+        'restaurantes en Xalapa Veracruz',
+        'cafeterias en Xalapa Veracruz',
+        'mariscos en Xalapa Veracruz',
+        'fondas en Xalapa Veracruz',
+        'taquerias en Xalapa Veracruz',
+        'bares en Xalapa Veracruz',
+        'pizzerias en Xalapa Veracruz',
+    ],
+    'cdmx': [
+        'restaurantes en CDMX',
+        'cafeterias en Ciudad de Mexico',
+        'bares en CDMX',
+        'taquerias en CDMX',
+    ],
+    'monterrey': [
+        'restaurantes en Monterrey',
+        'cafeterias en Monterrey',
+        'bares en Monterrey',
+    ],
+}
+
 def clean_phone(raw: str) -> str:
     return re.sub(r'[^\d+]', '', raw) if raw else ''
 
@@ -54,13 +77,11 @@ async def scrape_place(page, url: str) -> dict:
         await page.goto(url, timeout=20000, wait_until='domcontentloaded')
         await page.wait_for_timeout(1500)
 
-        # Name
         try:
             result['name'] = await page.locator('h1').first.inner_text(timeout=3000)
         except Exception:
             pass
 
-        # Phone
         try:
             btn = page.locator('button[aria-label*="Teléfono"], button[aria-label*="Phone"], [data-item-id*="phone"]').first
             label = await btn.get_attribute('aria-label', timeout=2000) or ''
@@ -71,7 +92,6 @@ async def scrape_place(page, url: str) -> dict:
         except Exception:
             pass
 
-        # Address
         try:
             addr = page.locator('button[data-item-id="address"]').first
             label = await addr.get_attribute('aria-label', timeout=2000) or ''
@@ -79,14 +99,12 @@ async def scrape_place(page, url: str) -> dict:
         except Exception:
             pass
 
-        # Website
         try:
             web = page.locator('a[data-item-id="authority"]').first
             result['website'] = await web.get_attribute('href', timeout=2000) or ''
         except Exception:
             pass
 
-        # Rating
         try:
             rating_el = page.locator('div[jsaction*="pane.rating"] span[aria-hidden]').first
             result['rating'] = await rating_el.inner_text(timeout=2000)
@@ -124,53 +142,59 @@ async def collect_links(page, query: str, depth: int) -> list[str]:
 
     return list(links)
 
-async def run_scraper(query: str, limit: int, depth: int, output: str, email: bool):
-    console.print(f"\n[bold cyan] /\\_____/\\ [/bold cyan]")
-    console.print(f"[bold cyan]( o   o  )  ScrappyCat 🐱[/bold cyan]")
-    console.print(f"[bold cyan] =( Y )=    Buscando: [white]{query}[/white][/bold cyan]\n")
-
+async def scrape_query(browser, query: str, limit: int, depth: int, do_email: bool, seen_urls: set) -> list[dict]:
+    context = await browser.new_context(
+        viewport={'width': 1280, 'height': 800},
+        locale='es-MX',
+        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    )
     results = []
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            viewport={'width': 1280, 'height': 800},
-            locale='es-MX',
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
-
+    try:
         search_page = await context.new_page()
-
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
-            task = progress.add_task("Recolectando links...", total=None)
-            links = await collect_links(search_page, query, depth)
-            links = links[:limit]
-            progress.update(task, description=f"Encontrados {len(links)} lugares. Scrapeando...")
+        console.print(f"\n[bold yellow]→ Query:[/bold yellow] {query}")
+        links = await collect_links(search_page, query, depth)
+        links = [l for l in links if l not in seen_urls][:limit]
+        seen_urls.update(links)
+        console.print(f"  [dim]{len(links)} lugares nuevos encontrados[/dim]")
 
         detail_page = await context.new_page()
-        email_page = await context.new_page() if email else None
+        email_page = await context.new_page() if do_email else None
 
         for i, url in enumerate(links):
-            console.print(f"[dim][{i+1}/{len(links)}][/dim] ", end="")
+            console.print(f"  [dim][{i+1}/{len(links)}][/dim] ", end="")
             data = await scrape_place(detail_page, url)
 
-            if email and data.get('website') and email_page:
+            if do_email and data.get('website') and email_page:
                 emails = await extract_emails(email_page, data['website'])
                 data['email'] = ', '.join(emails)
             else:
                 data['email'] = ''
 
             results.append(data)
-            status = f"[green]{data['name']}[/green]"
+            name_str = f"[green]{data['name']}[/green]"
             phone_str = f" | 📞 {data['phone']}" if data['phone'] else ""
             email_str = f" | ✉ {data['email']}" if data.get('email') else ""
-            console.print(f"{status}{phone_str}{email_str}")
+            console.print(f"{name_str}{phone_str}{email_str}")
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+    finally:
+        await context.close()
+    return results
 
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+async def run_scraper(queries: list[str], limit: int, depth: int, output: str, do_email: bool):
+    console.print(f"\n[bold cyan] /\\_____/\\ [/bold cyan]")
+    console.print(f"[bold cyan]( o   o  )  ScrappyCat 🐱[/bold cyan]")
+    console.print(f"[bold cyan] =( Y )=    {len(queries)} queries | limit {limit} c/u[/bold cyan]\n")
 
+    all_results = []
+    seen_urls = set()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        for query in queries:
+            results = await scrape_query(browser, query, limit, depth, do_email, seen_urls)
+            all_results.extend(results)
         await browser.close()
 
-    # Save CSV
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fields = ['name', 'phone', 'whatsapp', 'email', 'address', 'website', 'rating', 'maps_url']
@@ -178,35 +202,78 @@ async def run_scraper(query: str, limit: int, depth: int, output: str, email: bo
     with open(out_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(results)
+        writer.writerows(all_results)
 
-    # Summary table
-    table = Table(title=f"\n🐱 ScrappyCat — {len(results)} leads encontrados")
+    table = Table(title=f"\n🐱 ScrappyCat — {len(all_results)} leads totales")
     table.add_column("Nombre", style="cyan")
     table.add_column("Teléfono")
     table.add_column("Email")
-
-    for r in results[:10]:
-        table.add_row(r['name'][:40], r['phone'] or '—', r.get('email') or '—')
+    for r in all_results[:12]:
+        table.add_row(r['name'][:38], r['phone'] or '—', r.get('email') or '—')
 
     console.print(table)
     console.print(f"\n[bold green]✓ Guardado en {out_path}[/bold green]")
-    console.print(f"[dim]WhatsApp links incluidos en columna 'whatsapp'[/dim]\n")
+    console.print(f"[dim]WhatsApp links en columna 'whatsapp' · {len(all_results)} leads sin duplicados[/dim]\n")
 
-@click.command()
+@click.group()
+def cli():
+    pass
+
+@cli.command()
 @click.argument('query')
-@click.option('--limit', '-l', default=100, help='Max resultados (default: 100)')
+@click.option('--limit', '-l', default=100, help='Max resultados por query (default: 100)')
 @click.option('--depth', '-d', default=8, help='Scroll depth (default: 8)')
 @click.option('--output', '-o', default='output/leads.csv', help='Archivo de salida')
 @click.option('--email/--no-email', default=True, help='Extraer emails de websites')
-def main(query, limit, depth, output, email):
-    """🐱 ScrappyCat — encuentra leads en Google Maps\n
-    Ejemplos:\n
-      scrappycat "restaurantes en Xalapa Veracruz"\n
-      scrappycat "dentistas en Monterrey" --limit 50\n
-      scrappycat "gyms en CDMX" --output gyms_cdmx.csv
+def search(query, limit, depth, output, email):
+    """Busca una categoria en Google Maps.
+
+    \b
+    Ejemplos:
+      python scrappycat.py search "restaurantes en Xalapa Veracruz"
+      python scrappycat.py search "dentistas en Monterrey" --limit 50
     """
-    asyncio.run(run_scraper(query, limit, depth, output, email))
+    asyncio.run(run_scraper([query], limit, depth, output, email))
+
+@cli.command()
+@click.argument('queries_file', type=click.Path(exists=True))
+@click.option('--limit', '-l', default=80, help='Max resultados por query (default: 80)')
+@click.option('--depth', '-d', default=8, help='Scroll depth (default: 8)')
+@click.option('--output', '-o', default='output/leads.csv', help='Archivo de salida')
+@click.option('--email/--no-email', default=True, help='Extraer emails de websites')
+def batch(queries_file, limit, depth, output, email):
+    """Corre multiples queries desde un archivo (una por linea).
+
+    \b
+    Ejemplos:
+      python scrappycat.py batch queries.txt
+      python scrappycat.py batch queries.txt --output xalapa_leads.csv
+    """
+    queries = [q.strip() for q in open(queries_file) if q.strip()]
+    console.print(f"[bold]Cargadas {len(queries)} queries de {queries_file}[/bold]")
+    asyncio.run(run_scraper(queries, limit, depth, output, email))
+
+@cli.command()
+@click.argument('city_name')
+@click.option('--limit', '-l', default=80, help='Max resultados por query (default: 80)')
+@click.option('--output', '-o', default='output/leads.csv', help='Archivo de salida')
+@click.option('--email/--no-email', default=True, help='Extraer emails de websites')
+def city(city_name, limit, output, email):
+    """Scrapea una ciudad completa con queries predefinidas.
+
+    \b
+    Ciudades disponibles: xalapa, cdmx, monterrey
+
+    Ejemplos:
+      python scrappycat.py city xalapa
+      python scrappycat.py city cdmx --limit 50
+    """
+    queries = LATAM_QUERIES.get(city_name.lower())
+    if not queries:
+        available = ', '.join(LATAM_QUERIES.keys())
+        console.print(f"[red]Ciudad no encontrada. Disponibles: {available}[/red]")
+        return
+    asyncio.run(run_scraper(queries, limit, 8, output, email))
 
 if __name__ == '__main__':
-    main()
+    cli()
